@@ -57,13 +57,14 @@ def init_db():
     # This is the actual search engine heart.
     # FTS5 builds an inverted index automatically so searches are instant.
     # 'porter ascii' tokenizer means: "running" also matches "run" and "runs"
+    # Standalone (not external-content) FTS5 table — it stores its own copy
+    # of title/body since the 'pages' table has no 'body' column to link to.
     conn.execute('''
         CREATE VIRTUAL TABLE IF NOT EXISTS search_index
         USING fts5(
             url    UNINDEXED,   -- stored but NOT searchable (just an identifier)
             title,              -- searchable
             body,               -- searchable (the page's full text)
-            content='pages',    -- links back to the pages table
             tokenize='porter ascii'
         )
     ''')
@@ -128,6 +129,58 @@ def page_exists(url):
     ''', (url,)).fetchone()
     conn.close()
     return row is not None
+
+
+# ──────────────────────────────────────────────
+# CRAWL QUEUE — lets the crawler persist where it's up to,
+# so a run can be killed and resumed without losing progress.
+# ──────────────────────────────────────────────
+
+def add_to_queue(url):
+    """Add a URL to the crawl queue (no-op if already queued)."""
+    conn = get_connection()
+    try:
+        conn.execute('''
+            INSERT OR IGNORE INTO crawl_queue (url, status)
+            VALUES (?, 'pending')
+        ''', (url,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_next_url():
+    """Pop the oldest pending URL off the queue and mark it in-progress.
+
+    Returns the URL string, or None if the queue is empty.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute('''
+            SELECT url FROM crawl_queue WHERE status = 'pending'
+            ORDER BY id ASC LIMIT 1
+        ''').fetchone()
+        if row is None:
+            return None
+        conn.execute('''
+            UPDATE crawl_queue SET status = 'done' WHERE url = ?
+        ''', (row['url'],))
+        conn.commit()
+        return row['url']
+    finally:
+        conn.close()
+
+
+def mark_queue_failed(url):
+    """Mark a queued URL as failed (so it's not retried forever)."""
+    conn = get_connection()
+    try:
+        conn.execute('''
+            UPDATE crawl_queue SET status = 'failed' WHERE url = ?
+        ''', (url,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ──────────────────────────────────────────────
