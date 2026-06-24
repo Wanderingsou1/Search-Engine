@@ -34,3 +34,13 @@ STAY_ON_DOMAIN = True
 
 # Number of results to show per search page
 RESULTS_PER_PAGE = 10
+
+# ──────────────────────────────────────────────
+# RANKING SETTINGS
+# ──────────────────────────────────────────────
+
+# How much weight to give the TF-IDF relevance score vs. the link-popularity
+# score when blending them into a final ranking score. These don't need to
+# sum to 1 — they're just relative weights.
+TFIDF_WEIGHT = 1.0
+LINK_WEIGHT = 0.5
