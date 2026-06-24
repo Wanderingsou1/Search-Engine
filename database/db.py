@@ -69,6 +69,16 @@ def init_db():
         )
     ''')
 
+    # --- TABLE 4: idf_scores ---
+    # Caches the IDF (inverse document frequency) score for every word
+    # in the corpus, so we don't have to recompute it on every search.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS idf_scores (
+            word TEXT PRIMARY KEY,
+            idf  REAL NOT NULL
+        )
+    ''')
+
     conn.commit()
     conn.close()
     print('Database initialized successfully.')
@@ -179,6 +189,134 @@ def mark_queue_failed(url):
             UPDATE crawl_queue SET status = 'failed' WHERE url = ?
         ''', (url,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────
+# INDEXING — used by the indexer's reindex pipeline
+# ──────────────────────────────────────────────
+
+def get_all_pages_with_body():
+    """Join pages with their body text from the FTS index.
+
+    Returns a list of rows with url, title, body.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute('''
+            SELECT pages.url AS url, pages.title AS title, search_index.body AS body
+            FROM pages
+            JOIN search_index ON search_index.url = pages.url
+        ''').fetchall()
+        return rows
+    finally:
+        conn.close()
+
+
+def update_word_count(url, word_count):
+    """Save the processed-token count for a page."""
+    conn = get_connection()
+    try:
+        conn.execute('''
+            UPDATE pages SET word_count = ? WHERE url = ?
+        ''', (word_count, url))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def compute_inbound_link_counts():
+    """Count distinct inbound links per URL from the links table.
+
+    Returns a dict mapping to_url -> count.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute('''
+            SELECT to_url, COUNT(DISTINCT from_url) AS count
+            FROM links
+            GROUP BY to_url
+        ''').fetchall()
+        return {row['to_url']: row['count'] for row in rows}
+    finally:
+        conn.close()
+
+
+def get_inbound_links_map():
+    """Return {url: inbound_links} for every crawled page, from the pages table."""
+    conn = get_connection()
+    try:
+        rows = conn.execute('SELECT url, inbound_links FROM pages').fetchall()
+        return {row['url']: row['inbound_links'] for row in rows}
+    finally:
+        conn.close()
+
+
+def update_inbound_links(url, count):
+    """Save the inbound link count for a page."""
+    conn = get_connection()
+    try:
+        conn.execute('''
+            UPDATE pages SET inbound_links = ? WHERE url = ?
+        ''', (count, url))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────
+# IDF CACHE — used by the ranker to avoid recomputing
+# IDF scores across the whole corpus on every search
+# ──────────────────────────────────────────────
+
+def save_idf_scores(idf_scores):
+    """Overwrite the cached IDF table with a fresh word -> idf mapping."""
+    conn = get_connection()
+    try:
+        conn.execute('DELETE FROM idf_scores')
+        conn.executemany(
+            'INSERT INTO idf_scores (word, idf) VALUES (?, ?)',
+            list(idf_scores.items())
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_idf_scores():
+    """Load the cached word -> idf mapping. Returns {} if never computed."""
+    conn = get_connection()
+    try:
+        rows = conn.execute('SELECT word, idf FROM idf_scores').fetchall()
+        return {row['word']: row['idf'] for row in rows}
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────
+# SEARCH — Phase 5 entry point
+# ──────────────────────────────────────────────
+
+def search_db(query, limit=10):
+    """
+    Run a full-text search against search_index.
+    Returns a list of dicts with url, title, and a snippet excerpt of body.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute('''
+            SELECT
+                url,
+                title,
+                snippet(search_index, 2, '[', ']', '...', 10) AS snippet,
+                rank
+            FROM search_index
+            WHERE search_index MATCH ?
+            ORDER BY rank
+            LIMIT ?
+        ''', (query, limit)).fetchall()
+        return [dict(row) for row in rows]
     finally:
         conn.close()
 
